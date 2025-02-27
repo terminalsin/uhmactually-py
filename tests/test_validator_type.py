@@ -391,7 +391,7 @@ def test_user_model_fuzzing(iterations):
         ("str_or_int", ["hello", 123, "", 0, -1], [None, [1, 2, 3], {"a": 1}, 1.23]),
         (
             "fixed_tuple",
-            [tuple(("a", 1, True)), tuple(("", 0, False))],
+            [("a", 1, True), ("", 0, False)],
             [(1, 2, 3), ("a", "b", "c"), None, "not a tuple", 123, [1, 2, 3]],
         ),
         (
