@@ -11,6 +11,7 @@ from typing import (
     Set,
     Callable,
 )
+import inspect
 
 from uhmactually.core import (
     Validator,
@@ -18,17 +19,61 @@ from uhmactually.core import (
     ValidationResult,
     ValidatedModel,
 )
-from uhmactually.validators.registry import validator
 
 
-@validator
+# Helper functions for type validation
+def is_type(value: Any, expected_type: Type) -> None:
+    """
+    Validate that a value is of the expected type.
+
+    Args:
+        value: The value to validate.
+        expected_type: The expected type.
+
+    Raises:
+        ValidationError: If the value is not of the expected type.
+    """
+    if not isinstance(value, expected_type):
+        raise ValidationError(
+            f"Expected type {expected_type.__name__}, got {type(value).__name__}",
+            None,
+            value,
+        )
+
+
+def is_instance_of(value: Any, cls: Type) -> None:
+    """
+    Validate that a value is an instance of the specified class.
+
+    Args:
+        value: The value to validate.
+        cls: The expected class.
+
+    Raises:
+        ValidationError: If the value is not an instance of the specified class.
+    """
+    if not isinstance(value, cls):
+        raise ValidationError(
+            f"Expected instance of {cls.__name__}, got {type(value).__name__}",
+            None,
+            value,
+        )
+
+
 class TypeValidator(Validator):
     """Validator that checks if a value is of the expected type."""
 
     def __init__(self, expected_type: Optional[Type] = None):
         self.expected_type = expected_type
 
-    def validate(self, func: Callable, value: Any, field_name: str) -> ValidationResult:
+    def validate(
+        self,
+        func: Callable,
+        value: Any,
+        field_name: str,
+        source_info: str = None,
+        parent_object: Any = None,
+    ) -> ValidationResult:
         """
         Validate that a value is of the expected type.
 
@@ -42,36 +87,55 @@ class TypeValidator(Validator):
         result = ValidationResult()
 
         # Skip validation if no expected_type is provided
-        if self.expected_type is None:
+        if self.expected_type is None or value is None:
             return result
 
         # Get the origin type (for generics like List, Dict, etc.)
         origin = get_origin(self.expected_type)
 
-        # Handle Union types (e.g., Union[str, int])
-        if origin is Union:
-            union_types = get_args(self.expected_type)
-            # Check if None is allowed
-            none_allowed = type(None) in union_types
+        # Handle Any type (matches everything)
+        if self.expected_type is Any:
+            return result
 
-            # If value is None and None is allowed, skip validation
-            if value is None and none_allowed:
+        # Handle Union types (including Optional which is Union[T, None])
+        if origin is Union:
+            args = get_args(self.expected_type)
+            # If None is one of the types, the value can be None
+            if value is None and type(None) in args:
                 return result
 
-            # Filter out None from union types for validation
-            actual_types = [t for t in union_types if t is not type(None)]
+            # For non-None values, check if it matches any of the types
+            if value is not None:
+                # Remove None from the types to check
+                types_to_check = [arg for arg in args if arg is not type(None)]
+                for arg in types_to_check:
+                    # Create a new validator for each type and check
+                    type_validator = TypeValidator(arg)
+                    type_result = type_validator.validate(
+                        func, value, field_name, source_info, parent_object
+                    )
+                    if type_result.is_valid:
+                        return result  # If any type matches, validation passes
 
-            # Check if value matches any of the allowed types
-            if not any(self.is_of_type(value, t) for t in actual_types):
-                type_names = ", ".join(t.__name__ for t in actual_types)
+                # If we get here, no type matched
+                types_str = ", ".join(
+                    [
+                        arg.__name__ if hasattr(arg, "__name__") else str(arg)
+                        for arg in types_to_check
+                    ]
+                )
                 value_repr = self._get_value_repr(value)
                 result.add_error(
                     ValidationError(
-                        f"Expected one of types [{type_names}], got {type(value).__name__} with value: {value_repr}",
+                        f"Expected one of types ({types_str}), got {type(value).__name__} with value: {value_repr}",
                         field_name,
                         value,
+                        source_info,
+                        parent_object,
                     )
                 )
+                return result
+
         # Handle List types
         elif origin is list:
             if not self.is_of_type(value, list):
@@ -81,6 +145,8 @@ class TypeValidator(Validator):
                         f"Expected type list, got {type(value).__name__} with value: {value_repr}",
                         field_name,
                         value,
+                        source_info,
+                        parent_object,
                     )
                 )
             else:
@@ -89,24 +155,27 @@ class TypeValidator(Validator):
                 if item_types and item_types[0] is not Any:
                     item_type = item_types[0]
                     for i, item in enumerate(value):
-                        # Skip None values if the item type allows it
-                        if item is None:
-                            if get_origin(item_type) is Union and type(
-                                None
-                            ) in get_args(item_type):
-                                continue
-                            else:
-                                result.add_error(
-                                    ValidationError(
-                                        f"Item at index {i} cannot be None",
-                                        field_name,
-                                        item,
-                                    )
+                        if not self.is_of_type(item, item_type):
+                            item_repr = self._get_value_repr(item)
+                            result.add_error(
+                                ValidationError(
+                                    f"List item at index {i} expected to be {item_type.__name__}, got {type(item).__name__} with value: {item_repr}",
+                                    field_name,
+                                    item,
+                                    source_info,
+                                    parent_object,
                                 )
-                                continue
+                            )
 
                         # Handle nested ValidatedModel classes
-                        if issubclass(item_type, ValidatedModel):
+                        if (
+                            inspect.isclass(item_type)
+                            and hasattr(item_type, "__mro__")
+                            and any(
+                                cls.__name__ == "ValidatedModel"
+                                for cls in item_type.__mro__
+                            )
+                        ):
                             mapped_item = None
                             if isinstance(item, item_type):
                                 mapped_item = item
@@ -127,16 +196,6 @@ class TypeValidator(Validator):
                                 for error in remapped_item.errors:
                                     result.add_error(error)
 
-                        # For simple types, check directly
-                        if not self.is_of_type(item, item_type):
-                            item_repr = self._get_value_repr(item)
-                            result.add_error(
-                                ValidationError(
-                                    f"Item at index {i} expected to be {item_type.__name__}, got {type(item).__name__} with value: {item_repr}",
-                                    field_name,
-                                    item,
-                                )
-                            )
         # Handle Dict types
         elif origin is dict:
             if not self.is_of_type(value, dict):
@@ -146,6 +205,8 @@ class TypeValidator(Validator):
                         f"Expected type dict, got {type(value).__name__} with value: {value_repr}",
                         field_name,
                         value,
+                        source_info,
+                        parent_object,
                     )
                 )
             else:
@@ -160,28 +221,12 @@ class TypeValidator(Validator):
                                     f"Dict key expected to be {key_type.__name__}, got {type(k).__name__} with value: {key_repr}",
                                     field_name,
                                     k,
+                                    source_info,
+                                    parent_object,
                                 )
                             )
-
                 if val_type is not Any:
                     for k, v in value.items():
-                        # Skip None values if the value type allows it
-                        if v is None:
-                            if get_origin(val_type) is Union and type(None) in get_args(
-                                val_type
-                            ):
-                                continue
-                            else:
-                                result.add_error(
-                                    ValidationError(
-                                        f"Dict value for key '{k}' cannot be None",
-                                        field_name,
-                                        v,
-                                    )
-                                )
-                                continue
-
-                        # For simple types, check directly
                         if not self.is_of_type(v, val_type):
                             val_repr = self._get_value_repr(v)
                             result.add_error(
@@ -189,54 +234,75 @@ class TypeValidator(Validator):
                                     f"Dict value for key '{k}' expected to be {val_type.__name__}, got {type(v).__name__} with value: {val_repr}",
                                     field_name,
                                     v,
+                                    source_info,
+                                    parent_object,
                                 )
                             )
+
+        # Handle Tuple types
         elif origin is tuple:
-            if not self.is_of_type(value, tuple) and not self.is_of_type(value, list):
+            if not self.is_of_type(value, tuple):
                 value_repr = self._get_value_repr(value)
                 result.add_error(
                     ValidationError(
                         f"Expected type tuple, got {type(value).__name__} with value: {value_repr}",
                         field_name,
                         value,
+                        source_info,
+                        parent_object,
                     )
                 )
             else:
-                tuple_types = get_args(self.expected_type)
-                if len(tuple_types) != len(value):
-                    value_repr = self._get_value_repr(value)
-                    result.add_error(
-                        ValidationError(
-                            f"Expected tuple of length {len(tuple_types)}, got tuple of length {len(value)} with value: {value_repr}",
-                            field_name,
-                            value,
-                        )
-                    )
-                else:
-                    for i, item in enumerate(value):
-                        if not self.is_of_type(item, tuple_types[i]):
-                            item_repr = self._get_value_repr(item)
-                            result.add_error(
-                                ValidationError(
-                                    f"Tuple item at index {i} expected to be {tuple_types[i].__name__}, got {type(item).__name__} with value: {item_repr}",
-                                    field_name,
-                                    item,
-                                )
+                # Check the types of items in the tuple if specified
+                item_types = get_args(self.expected_type)
+                if item_types:
+                    # Check if the tuple has the correct length
+                    if len(value) != len(item_types):
+                        result.add_error(
+                            ValidationError(
+                                f"Expected tuple of length {len(item_types)}, got length {len(value)}",
+                                field_name,
+                                value,
+                                source_info,
+                                parent_object,
                             )
+                        )
+                    else:
+                        # Check each item against its expected type
+                        for i, (item, item_type) in enumerate(zip(value, item_types)):
+                            if item_type is not Any and not self.is_of_type(
+                                item, item_type
+                            ):
+                                item_repr = self._get_value_repr(item)
+                                result.add_error(
+                                    ValidationError(
+                                        f"Tuple item at index {i} expected to be {item_type.__name__}, got {type(item).__name__} with value: {item_repr}",
+                                        field_name,
+                                        item,
+                                        source_info,
+                                        parent_object,
+                                    )
+                                )
+
+        # Handle Set types
         elif origin is set:
             if not self.is_of_type(value, set) and not self.is_of_type(value, list):
                 value_repr = self._get_value_repr(value)
                 result.add_error(
                     ValidationError(
-                        f"Expected type set, got {type(value)} with value: {value_repr}",
+                        f"Expected type set, got {type(value).__name__} with value: {value_repr}",
                         field_name,
                         value,
+                        source_info,
+                        parent_object,
                     )
                 )
             else:
-                item_type = get_args(self.expected_type)[0]
-                if item_type is not Any:
-                    for item in value:
+                # Check the type of items in the set if specified
+                item_types = get_args(self.expected_type)
+                if item_types and item_types[0] is not Any:
+                    item_type = item_types[0]
+                    for i, item in enumerate(value):
                         if not self.is_of_type(item, item_type):
                             item_repr = self._get_value_repr(item)
                             result.add_error(
@@ -244,42 +310,84 @@ class TypeValidator(Validator):
                                     f"Set item expected to be {item_type.__name__}, got {type(item).__name__} with value: {item_repr}",
                                     field_name,
                                     item,
+                                    source_info,
+                                    parent_object,
                                 )
                             )
-        # Handle regular types
+
+        # Handle all other types
         elif not self.is_of_type(value, self.expected_type):
             value_repr = self._get_value_repr(value)
+            type_name = (
+                self.expected_type.__name__
+                if hasattr(self.expected_type, "__name__")
+                else str(self.expected_type)
+            )
             result.add_error(
                 ValidationError(
-                    f"Expected type {self.expected_type.__name__}, got {type(value).__name__} with value: {value_repr}",
+                    f"Expected type {type_name}, got {type(value).__name__} with value: {value_repr}",
                     field_name,
                     value,
+                    source_info,
+                    parent_object,
                 )
             )
 
         return result
 
-    def default(self, func: Callable, value: Any, field_name: str) -> ValidationResult:
+    def default(
+        self,
+        func: Callable,
+        value: Any,
+        field_name: str,
+        source_info: str = None,
+        parent_object: Any = None,
+    ) -> ValidationResult:
         """
         Default validation method that runs all the time.
-        For TypeValidator, this does the same validation as the validate method.
+        For TypeValidator, this checks the type based on the function's return annotation.
 
         Args:
+            func: The function being validated.
             value: The value to validate.
             field_name: The name of the field being validated.
+            source_info: Information about where the field is defined.
+            parent_object: The object containing this field.
 
         Returns:
             A ValidationResult object.
         """
+        result = ValidationResult()
 
-        if func.__annotations__:
+        # Get the expected type from the function's return annotation
+        if func.__annotations__ and "return" in func.__annotations__:
             self.expected_type = func.__annotations__["return"]
         else:
+            # If no return type annotation, try to infer the type from the value
             self.expected_type = None
-            print("No expected type found for function", func.__name__)
+            print(
+                f"No expected type found for function {func.__name__} in {field_name} from {source_info}"
+            )
+
+            # Even without a type annotation, we can still do basic type validation
+            # based on the value's type
+            if isinstance(value, (str, int, float, bool, list, dict, tuple, set)):
+                # For basic types, validate that future values match this type
+                expected_type = type(value)
+                if not isinstance(value, expected_type):
+                    result.add_error(
+                        ValidationError(
+                            f"Expected type {expected_type.__name__}, got {type(value).__name__}",
+                            field_name,
+                            value,
+                            source_info,
+                            parent_object,
+                        )
+                    )
+                return result
 
         # For TypeValidator, default validation is the same as regular validation
-        return self.validate(func, value, field_name)
+        return self.validate(func, value, field_name, source_info, parent_object)
 
     def _get_value_repr(self, value: Any) -> str:
         """
@@ -340,14 +448,20 @@ class TypeValidator(Validator):
         return isinstance(object, origin)
 
 
-@validator
 class InstanceValidator(Validator):
     """Validator that checks if a value is an instance of a specific class."""
 
     def __init__(self, cls: Optional[Type] = None):
         self.cls = cls
 
-    def validate(self, func: Callable, value: Any, field_name: str) -> ValidationResult:
+    def validate(
+        self,
+        func: Callable,
+        value: Any,
+        field_name: str,
+        source_info: str = None,
+        parent_object: Any = None,
+    ) -> ValidationResult:
         """
         Validate that a value is an instance of the specified class.
 
@@ -378,12 +492,21 @@ class InstanceValidator(Validator):
                     f"Expected instance of {self.cls.__name__}, got {type(value).__name__} with value: {value_str}",
                     field_name,
                     value,
+                    source_info,
+                    parent_object,
                 )
             )
 
         return result
 
-    def default(self, func: Callable, value: Any, field_name: str) -> ValidationResult:
+    def default(
+        self,
+        func: Callable,
+        value: Any,
+        field_name: str,
+        source_info: str = None,
+        parent_object: Any = None,
+    ) -> ValidationResult:
         """
         Default validation method that runs all the time.
         For InstanceValidator, this does nothing by default.
@@ -391,6 +514,8 @@ class InstanceValidator(Validator):
         Args:
             value: The value to validate.
             field_name: The name of the field being validated.
+            source_info: Additional information about the source of the value.
+            parent_object: The object containing this field.
 
         Returns:
             A ValidationResult object.
@@ -400,12 +525,62 @@ class InstanceValidator(Validator):
         return ValidationResult()
 
 
-# Decorator factories
-def is_type(expected_type: Type):
-    """Decorator to validate that a value is of the expected type."""
-    return TypeValidator.create_decorator(expected_type)
+# Helper function wrappers for validators
+def type_check(value, expected_type: Type, field_name: str = None):
+    """
+    Check if a value is of the expected type.
+
+    Args:
+        value: The value to check.
+        expected_type: The expected type.
+        field_name: The name of the field being validated. If None, will try to determine from call stack.
+
+    Raises:
+        ValidationError: If the value is not of the expected type.
+    """
+    # Try to determine field name from call stack if not provided
+    if field_name is None:
+        import inspect
+
+        frame = inspect.currentframe().f_back
+        if frame:
+            # Get the function that called this function
+            func_name = frame.f_code.co_name
+            # If the function name is a property name in a ValidatedModel class, use it as field_name
+            if func_name != "<module>":
+                field_name = func_name
+
+    validator = TypeValidator(expected_type)
+    result = validator.validate(type_check, value, field_name or "value")
+    if not result.is_valid:
+        raise ValidationError(result.errors[0].message, field_name, value)
 
 
-def is_instance_of(cls: Type):
-    """Decorator to validate that a value is an instance of a specific class."""
-    return InstanceValidator.create_decorator(cls)
+def instance_check(value, cls: Type, field_name: str = None):
+    """
+    Check if a value is an instance of the specified class.
+
+    Args:
+        value: The value to check.
+        cls: The expected class.
+        field_name: The name of the field being validated. If None, will try to determine from call stack.
+
+    Raises:
+        ValidationError: If the value is not an instance of the specified class.
+    """
+    # Try to determine field name from call stack if not provided
+    if field_name is None:
+        import inspect
+
+        frame = inspect.currentframe().f_back
+        if frame:
+            # Get the function that called this function
+            func_name = frame.f_code.co_name
+            # If the function name is a property name in a ValidatedModel class, use it as field_name
+            if func_name != "<module>":
+                field_name = func_name
+
+    validator = InstanceValidator(cls)
+    result = validator.validate(instance_check, value, field_name or "value")
+    if not result.is_valid:
+        raise ValidationError(result.errors[0].message, field_name, value)

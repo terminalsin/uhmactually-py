@@ -8,9 +8,9 @@ from uhmactually.core import (
     validate,
 )
 from uhmactually.validators import (
-    one_of,
-    not_in,
-    is_enum,
+    one_of_check,
+    not_in_check,
+    is_enum_check,
 )
 
 
@@ -31,41 +31,74 @@ class Status(Enum):
 class EnumValidatorModel(ValidatedModel):
     """A model with enum validators."""
 
-    @one_of(["apple", "banana", "cherry"])
-    def fruit(self) -> str:
-        pass
+    @validate
+    def fruit(self, value=None) -> str:
+        if value is not None:
+            one_of_check(value, ["apple", "banana", "cherry"])
+        return value
 
-    @one_of({"red", "green", "blue"})
-    def color_name(self) -> str:
-        pass
+    @validate
+    def color_name(self, value=None) -> str:
+        if value is not None:
+            one_of_check(value, {"red", "green", "blue"})
+        return value
 
-    @one_of(("small", "medium", "large"))
-    def size(self) -> str:
-        pass
+    @validate
+    def size(self, value=None) -> str:
+        if value is not None:
+            one_of_check(value, ("small", "medium", "large"))
+        return value
 
-    @one_of(["YES", "NO"], case_sensitive=False)
-    def case_insensitive_choice(self) -> str:
-        pass
+    @validate
+    def case_insensitive_choice(self, value=None) -> str:
+        if value is not None:
+            # Note: case_sensitive parameter is not supported in the new approach
+            # We would need to implement a custom check for this
+            if value.lower() not in ["yes", "no"]:
+                raise ValidationError(
+                    f"Value '{value}' is not in the set of allowed values: 'YES', 'NO' (case-insensitive)",
+                    None,
+                    value,
+                )
+        return value
 
-    @is_enum(Color)
-    def color(self) -> str:
-        pass
+    @validate
+    def color(self, value=None) -> str:
+        if value is not None:
+            is_enum_check(value, Color)
+        return value
 
-    @is_enum(Status)
-    def status(self) -> int:
-        pass
+    @validate
+    def status(self, value=None) -> int:
+        if value is not None:
+            is_enum_check(value, Status)
+        return value
 
 
 class NotInValidatorModel(ValidatedModel):
     """A model with not_in validators."""
 
-    @not_in(["forbidden", "restricted", "banned"])
-    def allowed_word(self) -> str:
-        pass
+    @validate
+    def allowed_word(self, value=None) -> str:
+        if value is not None:
+            not_in_check(value, ["forbidden", "restricted", "banned"])
+        return value
 
-    @not_in(["FORBIDDEN", "RESTRICTED", "BANNED"], case_sensitive=False)
-    def case_insensitive_allowed(self) -> str:
-        pass
+    @validate
+    def case_insensitive_allowed(self, value=None) -> str:
+        if value is not None:
+            # Note: case_sensitive parameter is not supported in the new approach
+            # We would need to implement a custom check for this
+            if any(
+                word.lower() == value.lower()
+                for word in ["FORBIDDEN", "RESTRICTED", "BANNED"]
+            ):
+                raise ValidationError(
+                    f"Value '{value}' is in the set of disallowed values: 'FORBIDDEN', 'RESTRICTED', 'BANNED' (case-insensitive)",
+                    None,
+                    value,
+                )
+        return value
 
 
 # Parametrized Tests for EnumValidator with lists

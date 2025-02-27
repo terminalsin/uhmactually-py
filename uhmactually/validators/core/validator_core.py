@@ -1,132 +1,151 @@
-from typing import Any, Callable, Optional as OptionalType
-
+from typing import Any, Callable, Optional, TypeVar, Generic, Union
+import inspect
 from uhmactually.core import (
     Validator,
     ValidationError,
     ValidationResult,
 )
-from uhmactually.validators.registry import validator
 
 
-@validator
-class AllowNoneValidator(Validator):
-    """Validator that checks if a value can be None."""
+# Optional validation helper
+def optional(value: Any) -> None:
+    """
+    Validate that a value can be None.
+    This is a no-op function that allows None values.
 
-    def __init__(self, allow_none: bool = False):
-        """
-        Initialize the validator.
+    Args:
+        value: The value to validate.
 
-        Args:
-            allow_none: Whether to allow None values. Default is False.
-        """
-        self.allow_none = allow_none
-
-    def validate(self, func: Callable, value: Any, field_name: str) -> ValidationResult:
-        """
-        Validate that a value can be None if allowed.
-
-        Args:
-            func: The function being validated.
-            value: The value to validate.
-            field_name: The name of the field being validated.
-
-        Returns:
-            A ValidationResult object.
-        """
-        result = ValidationResult()
-
-        if value is None and not self.allow_none:
-            result.add_error(
-                ValidationError(
-                    f"None value is not allowed for field '{field_name}'",
-                    field_name,
-                    value,
-                )
-            )
-
-        return result
-
-    def default(self, func: Callable, value: Any, field_name: str) -> ValidationResult:
-        """
-        Default validation method that runs all the time.
-        For AllowNoneValidator, this does the same validation as the validate method.
-
-        Args:
-            func: The function being validated.
-            value: The value to validate.
-            field_name: The name of the field being validated.
-
-        Returns:
-            A ValidationResult object.
-        """
-        return self.validate(func, value, field_name)
+    Raises:
+        ValidationError: This function never raises ValidationError.
+    """
+    # This function allows None values, so it does nothing
+    pass
 
 
-@validator
+def allow_none(value: Any = None, allow: bool = True) -> None:
+    """
+    Validate that a field allows None values.
+
+    Args:
+        value: The value to validate.
+        allow: Whether the field allows None values. Default is True.
+
+    Raises:
+        ValidationError: If the field does not allow None values and the value is None.
+    """
+    if not allow and value is None:
+        raise ValidationError(
+            f"None value is not allowed",
+            None,
+            value,
+        )
+
+
 class OptionalValidator(Validator):
-    """Validator that checks if a field is optional."""
+    """Validator that allows a value to be None."""
 
-    def __init__(self, optional: bool = False):
-        """
-        Initialize the validator.
+    def __init__(self, is_optional: bool = False):
+        self.is_optional = is_optional
 
-        Args:
-            optional: Whether the field is optional. Default is False.
+    def validate(
+        self,
+        func: Callable,
+        value: Any,
+        field_name: str,
+        source_info: str = None,
+        parent_object: Any = None,
+    ) -> ValidationResult:
         """
-        self.optional = optional
-
-    def validate(self, func: Callable, value: Any, field_name: str) -> ValidationResult:
-        """
-        Validate that a field is provided if not optional.
+        Validate that a value can be None.
+        This validator always passes.
 
         Args:
             func: The function being validated.
             value: The value to validate.
             field_name: The name of the field being validated.
+            source_info: Information about where the field is defined.
+            parent_object: The object containing this field.
 
         Returns:
             A ValidationResult object.
         """
-        result = ValidationResult()
-
-        # If the field is optional, we don't need to validate anything
-        if self.optional:
-            return result
-
-        # If the field is not optional and the value is None, add an error
-        if value is None:
-            result.add_error(
-                ValidationError(
-                    f"Field '{field_name}' is required and cannot be None",
-                    field_name,
-                    value,
-                )
+        if self.is_optional:
+            # This validator allows None values, so it always passes
+            return ValidationResult()
+        elif value is None:
+            raise ValidationError(
+                f"Value is not optional by default and was found to be None",
+                field_name,
+                value,
             )
+        else:
+            return ValidationResult()
 
-        return result
-
-    def default(self, func: Callable, value: Any, field_name: str) -> ValidationResult:
+    def default(
+        self,
+        func: Callable,
+        value: Any,
+        field_name: str,
+        source_info: str = None,
+        parent_object: Any = None,
+    ) -> ValidationResult:
         """
         Default validation method that runs all the time.
-        For OptionalValidator, this does the same validation as the validate method.
+        For OptionalValidator, this does nothing.
 
         Args:
             func: The function being validated.
             value: The value to validate.
             field_name: The name of the field being validated.
+            source_info: Information about where the field is defined.
+            parent_object: The object containing this field.
 
         Returns:
             A ValidationResult object.
         """
-        return self.validate(func, value, field_name)
+        # Default implementation does nothing
+        if value is None:
+            raise ValidationError(
+                f"Value is not optional by default and was found to be None",
+                field_name,
+                value,
+            )
+        else:
+            return ValidationResult()
+
+
+# Helper function wrapper for optional validator
+def optional_check(value):
+    """
+    Check if a value is not None.
+
+    Args:
+        value: The value to check.
+
+    Raises:
+        ValidationError: If the value is None.
+    """
+    # Try to determine field name from call stack
+    field_name = None
+    import inspect
+
+    frame = inspect.currentframe().f_back
+    if frame:
+        # Get the function that called this function
+        func_name = frame.f_code.co_name
+        # If the function name is a property name in a ValidatedModel class, use it as field_name
+        if func_name != "<module>":
+            field_name = func_name
+
+    validator = OptionalValidator()
+    result = validator.validate(optional_check, value, field_name or "value")
+    if not result.is_valid:
+        raise ValidationError(result.errors[0].message, field_name, value)
 
 
 # Decorator factories
-def allow_none(allow: bool = True):
-    """Decorator to validate that a value can be None."""
-    return AllowNoneValidator.create_decorator(allow)
-
-
 def optional(is_optional: bool = True):
     """Decorator to validate that a field is optional."""
-    return OptionalValidator.create_decorator(is_optional)
+    print("optional decorator", is_optional)
+    return lambda func: OptionalValidator(is_optional).validate

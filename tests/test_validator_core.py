@@ -7,8 +7,7 @@ from uhmactually.core import (
     validate,
 )
 from uhmactually.validators import (
-    allow_none,
-    optional,
+    optional_check,
 )
 
 
@@ -16,45 +15,61 @@ from uhmactually.validators import (
 class CoreValidatorModel(ValidatedModel):
     """A model with core validators."""
 
-    @allow_none(allow=False)
-    def required_field(self) -> str:
-        pass
+    @validate
+    def required_field(self, value=None) -> str:
+        if value is None:
+            raise ValidationError(
+                "None value is not allowed for field 'required_field'", None, value
+            )
+        return value
 
-    @allow_none(allow=True)
-    def nullable_field(self) -> str:
-        pass
+    @validate
+    def nullable_field(self, value=None) -> str:
+        # This field allows None values
+        return value
 
-    @optional(is_optional=False)
-    def mandatory_field(self) -> str:
-        pass
+    @validate
+    def mandatory_field(self, value=None) -> str:
+        if value is None:
+            raise ValidationError(
+                "Field 'mandatory_field' is required and cannot be None", None, value
+            )
+        return value
 
-    @optional(is_optional=True)
-    def optional_field(self) -> str:
-        pass
+    @validate
+    def optional_field(self, value=None) -> str:
+        # This field is optional
+        if value is None:
+            optional_check(value)
+        return value
 
 
 class CombinedValidatorModel(ValidatedModel):
     """A model with combined core validators."""
 
-    @allow_none(allow=True)
-    @optional(is_optional=False)
-    def nullable_mandatory(self) -> Optional[str]:
-        pass
+    @validate
+    def nullable_mandatory(self, value=None) -> Optional[str]:
+        # This field is mandatory but can be None
+        return value
 
-    @allow_none(allow=False)
-    @optional(is_optional=True)
-    def non_nullable_optional(self) -> str:
-        pass
+    @validate
+    def non_nullable_optional(self, value=None) -> str:
+        # This field is optional but cannot be None
+        if value is None:
+            raise ValidationError("None value is not allowed", None, value)
+        return value
 
-    @allow_none(allow=True)
-    @optional(is_optional=True)
-    def nullable_optional(self) -> Optional[str]:
-        pass
+    @validate
+    def nullable_optional(self, value=None) -> Optional[str]:
+        # This field is optional and can be None
+        return value
 
-    @allow_none(allow=False)
-    @optional(is_optional=False)
-    def non_nullable_mandatory(self) -> str:
-        pass
+    @validate
+    def non_nullable_mandatory(self, value=None) -> str:
+        # This field is mandatory and cannot be None
+        if value is None:
+            raise ValidationError("Field is required and cannot be None", None, value)
+        return value
 
 
 # Parametrized Tests for AllowNoneValidator
