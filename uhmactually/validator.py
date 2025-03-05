@@ -316,7 +316,7 @@ class ValidatedModel(ABC):
             if validator_already_used:
                 continue
 
-            if accept_none and field_value is None and not accept_none:
+            if field_value is None and not accept_none:
                 continue
 
             validator_instance = validator_class()

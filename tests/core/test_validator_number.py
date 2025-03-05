@@ -23,7 +23,7 @@ class TestMinNumberValidator:
         model = self.TestModel(value=value, value_custom=value)
         assert model.value() == value
 
-    @pytest.mark.parametrize("value", [9, 8, 7, None])
+    @pytest.mark.parametrize("value", [9, 8, 7, None, "String"])
     def test_min_value_failure(self, value):
         with pytest.raises(ValidationException):
             model = self.TestModel(value=value, value_custom=value)
@@ -33,7 +33,7 @@ class TestMinNumberValidator:
         model = self.TestModel(value=value, value_custom=value)
         assert model.value_custom() == value
 
-    @pytest.mark.parametrize("value", [15, None])
+    @pytest.mark.parametrize("value", [15, None, "String"])
     def test_min_value_custom_failure(self, value):
         with pytest.raises(ValidationException):
             model = self.TestModel(value=value, value_custom=value)
