@@ -1,18 +1,3 @@
-# UhmActually 🤓
-
-*may as well just use java at this point*
-
-## :book: Problem Statement
-
-At my job, we needed a validation library capable of:
-- Strict validation by schema
-- Allow custom validation per field
-- Maximize readability
-- Able to dump objects and types easily
-
-## 🔥 Quick Start
-
-```python
 import pytest
 from uhmactually.validator import ValidatedModel, validate, ValidationException
 from uhmactually.core.validator_number import min
@@ -34,21 +19,12 @@ class User(ValidatedModel):
 
 
 class TestReadme:
-    # this will work fine!
     def test_readme(self):
         user = User(age=18, nickname=None)
         assert user.age() == 18
         assert user.nickname() is None
 
-    # you can't be called Shanyu, will throw a validation error
     def test_readme_fail(self):
         with pytest.raises(ValidationException):
             user = User(age=13, nickname="Shanyu")
             user.nickname()
-```
-
-## 🚀 Installation
-
-```bash
-pip install uhmactually
-```
