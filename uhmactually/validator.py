@@ -15,32 +15,37 @@ import functools
 
 T = TypeVar("T")
 
-# Registry to store validator classes
-_validator_registry: Dict[str, Type["Validator"]] = {}
+_validator_registry: Dict[str, Dict[str, Any]] = {}
 
 
-def validator(validator_class: Type["Validator"]) -> Type["Validator"]:
+def validator(validator_class=None, *, accept_none=False):
     """
-    Decorator to register a Validator class.
-    This allows the validator to be used throughout the system.
+    Decorator to register a Validator class in the global registry.
+    Can be used as @validator or @validator(accept_none=True)
     """
-    if not issubclass(validator_class, Validator):
-        raise TypeError(
-            f"@validator can only be applied to Validator subclasses, got {validator_class.__name__}"
-        )
 
-    # Register this validator class by its type
-    _validator_registry[validator_class.registered_name()] = validator_class
+    def decorator(cls):
+        if not issubclass(cls, Validator):
+            raise TypeError(
+                f"@validator can only be applied to Validator subclasses, got {cls.__name__}"
+            )
 
-    # Return the class unchanged
-    return validator_class
+        _validator_registry[cls.registered_name()] = {
+            "validator": cls,
+            "accept_none": accept_none,
+        }
+        return cls
+
+    # Direct decoration: @validator
+    if validator_class is not None:
+        return decorator(validator_class)
+
+    # Parameterized decoration: @validator(accept_none=True)
+    return decorator
 
 
 def validate(field_func: Callable) -> Callable:
-    """
-    Decorator to mark a method as a field that needs validation.
-    This applies to methods in ValidatedModel subclasses.
-    """
+    """Marks a method as a validated field in ValidatedModel subclasses."""
 
     class ValidationMethodWrapper:
         def __init__(self, func):
@@ -55,36 +60,30 @@ def validate(field_func: Callable) -> Callable:
 
             @functools.wraps(self.func)
             def bound_method(*args, **kwargs):
-                # No args means getter call
-                if len(args) == 0:
-                    # Return the cached value if available
-                    field_name = self.func.__name__
+                field_name = self.func.__name__
+
+                if not args:
                     if field_name in obj._cached_values:
                         return obj._cached_values[field_name]
-                    # If no cached value and no args, run the function with None
                     return self.func(obj, None)
-                # With args, validate and update the value
+
                 result = self.func(obj, *args, **kwargs)
-                # Update cached value
-                field_name = self.func.__name__
                 obj._cached_values[field_name] = result
                 return result
 
-            # Copy validator attributes to the bound method
             bound_method._validators = self._validators
             bound_method._is_validation_field = True
 
             return bound_method
 
         def __call__(self, *args, **kwargs):
-            # This makes the wrapper callable directly
             return self.func(*args, **kwargs)
 
     return ValidationMethodWrapper(field_func)
 
 
 class ValidationInput:
-    """Container for data being validated along with its definition."""
+    """Container for data being validated with its metadata."""
 
     def __init__(
         self, value: Any, field_name: str, definition: Callable, model_instance=None
@@ -95,20 +94,35 @@ class ValidationInput:
         self.model_instance = model_instance
 
     def get_type(self) -> Optional[Type]:
-        """Get the expected type from the field definition."""
-        try:
-            return get_type_hints(self.definition).get("return")
-        except:
+        """Extracts type annotation from the field definition."""
+        if not hasattr(self.definition, "__annotations__"):
             return None
+
+        return self.definition.__annotations__.get("return")
+
+    def create_context(self) -> dict:
+        """Creates a context dictionary with all relevant validation information."""
+        return {
+            "value": self.value,
+            "field_name": self.field_name,
+            "model_instance": self.model_instance,
+        }
 
 
 class ValidationResult:
-    """Result of a validation operation."""
+    """Result of a validation operation with status, message, and transformed value."""
 
-    def __init__(self, is_valid: bool, message: str = None, value: Any = None):
+    def __init__(
+        self,
+        is_valid: bool,
+        message: str = None,
+        value: Any = None,
+        context: dict = None,
+    ):
         self.is_valid = is_valid
         self.message = message
-        self.value = value  # Can be used to transform the input
+        self.value = value
+        self.context = context or {}
 
 
 class Validator(ABC):
@@ -119,42 +133,24 @@ class Validator(ABC):
 
     @abstractmethod
     def validate(self, input: ValidationInput, **kwargs) -> ValidationResult:
-        """
-        Validate the input against this validator's rules.
-        Returns a ValidationResult with success/failure and optional transformed value.
-        """
+        """Validates input against rules, returning success/failure with optional transformation."""
         pass
 
     def default(self, input: ValidationInput) -> ValidationResult:
-        """
-        Default validation logic that runs even when this validator is not explicitly applied.
-        This is useful for validators that should run implicitly based on type annotations
-        or other function metadata.
-
-        Most validators will return success() here (no-op), but specialized validators
-        like TypeValidator or AllowNone will implement their own logic.
-
-        Returns ValidationResult with success/failure and optional transformed value.
-        """
-        # By default, no validation is performed
+        """Default validation logic applied when not explicitly called."""
         return self.success()
 
     @classmethod
     def registered_name(cls) -> str:
-        """
-        Get the name of the validator as it will be registered in the _validator_registry.
-        """
+        """Returns validator name for registry lookup."""
         return cls.__name__.lower().replace("validator", "")
 
     def generate_decorator(self, **kwargs) -> Callable:
-        """
-        Generate a decorator for this validator that can be applied to model fields.
-        """
+        """Creates a decorator that applies this validator to model fields."""
         decorator_kwargs = kwargs
         validator_instance = self
 
         def decorator(func):
-            # Create method wrapper class with descriptor protocol
             class MethodWrapper:
                 def __init__(self, func):
                     self.func = func
@@ -176,51 +172,44 @@ class Validator(ABC):
                     def bound_method(*args, **kwargs):
                         return self.func(obj, *args, **kwargs)
 
-                    # Copy validator attributes to the bound method
                     bound_method._validators = self._validators
                     bound_method._is_validation_field = True
-
                     return bound_method
 
                 def __call__(self, *args, **kwargs):
-                    # This makes the wrapper callable directly
                     return self.func(*args, **kwargs)
 
-            # Return an instance of the wrapper
             return MethodWrapper(func)
 
         return decorator
 
-    def fail(self, message: str) -> ValidationResult:
-        """Helper to create a failed validation result."""
-        return ValidationResult(is_valid=False, message=message)
+    def fail(self, message: str, additional_context=None) -> ValidationResult:
+        """Creates a failed validation result with given message."""
+        context = {} if additional_context is None else additional_context
+        return ValidationResult(is_valid=False, message=message, context=context)
 
-    def success(self, value: Any = None) -> ValidationResult:
-        """Helper to create a successful validation result, optionally with a transformed value."""
-        return ValidationResult(is_valid=True, value=value)
+    def success(self, value: Any = None, context=None) -> ValidationResult:
+        """Creates a successful validation result with optional transformed value."""
+        return ValidationResult(is_valid=True, value=value, context=context or {})
 
 
 class ValidatedModel(ABC):
     """Base class for models with field validation."""
 
     def __init__(self, **kwargs):
-        # Store all constructor arguments as attributes
-        self._fields = {}  # Track fields that have been set
-        self._cached_values = {}  # Store validated values
-        self._wrapped_values = {}  # Store wrapped callable values
+        self._fields = {}
+        self._cached_values = {}
+        self._wrapped_values = {}
 
         for key, value in kwargs.items():
             self._fields[key] = value
 
-        # Run validation after initialization
         self.validate()
 
     def __getattribute__(self, name):
-        # Special attributes shouldn't trigger the wrapper logic
         if name.startswith("_") or name == "validate":
             return super().__getattribute__(name)
 
-        # Check if we have a wrapped value already
         try:
             wrapped_values = super().__getattribute__("_wrapped_values")
             if name in wrapped_values:
@@ -228,149 +217,144 @@ class ValidatedModel(ABC):
         except (AttributeError, KeyError):
             pass
 
-        # If no wrapped value, check for a cached value
         try:
             cached_values = super().__getattribute__("_cached_values")
             if name in cached_values:
-                # Get the cached value
                 value = cached_values[name]
-                # Create a wrapper
                 wrapper = CallableValue(value, self, name)
-                # Store it for future use
                 wrapped_values = super().__getattribute__("_wrapped_values")
                 wrapped_values[name] = wrapper
                 return wrapper
         except (AttributeError, KeyError):
             pass
 
-        # If not a special attribute and not in cached values,
-        # use the normal attribute lookup
         return super().__getattribute__(name)
 
     def validate(self):
-        """
-        Scans the model for fields marked with @validate and validates them.
-        Raises ValidationException if validation fails.
-        """
-        # Find all methods marked with @validate
+        """Validates all fields in the model and raises ValidationException on failure."""
+        validation_fields = self._get_validation_fields()
+
+        for field_name, field_method in validation_fields.items():
+            if field_name not in self._fields and not hasattr(self, field_name):
+                continue
+
+            field_value = self._fields.get(field_name)
+            self._validate_field(field_name, field_method, field_value)
+
+        self._validate_custom()
+
+    def _get_validation_fields(self):
+        """Finds all methods marked with @validate."""
         validation_fields = {}
         for name, method in inspect.getmembers(self.__class__):
             if hasattr(method, "_is_validation_field") and method._is_validation_field:
                 validation_fields[name] = method
+        return validation_fields
 
-        # Process each validation field
-        for field_name, field_method in validation_fields.items():
-            # Skip if field wasn't provided and there's no default
-            if field_name not in self._fields and not hasattr(self, field_name):
+    def _validate_field(self, field_name, field_method, field_value):
+        """Validates a single field using its method and attached validators."""
+        sig = inspect.signature(field_method)
+        param_count = len(sig.parameters)
+
+        try:
+            if param_count == 1:  # Just self
+                result = field_method(self)
+            elif param_count == 2:  # self and input
+                result = field_method(self, field_value)
+            else:
+                raise ValueError(
+                    f"Invalid parameter count for {field_name}: expected 0 or 1, got {param_count - 1}"
+                )
+
+            self._cached_values[field_name] = result
+        except Exception as e:
+            if not isinstance(e, ValidationException):
+                expected_type = get_type_hints(field_method).get("return", Any)
+                raise ValidationException(
+                    message=str(e),
+                    field_name=field_name,
+                    received={"value": field_value},
+                    expected={"type": str(expected_type)},
+                )
+            raise
+
+        explicit_validators = []
+        if hasattr(field_method, "_validators") and field_method._validators:
+            explicit_validators = field_method._validators
+
+            for validator_config in explicit_validators:
+                validator_kwargs = validator_config["decorator_kwargs"]
+                validator_instance = validator_config["validator"]
+                self._run_validator(
+                    validator_instance,
+                    field_name,
+                    field_method,
+                    field_value,
+                    **validator_kwargs,
+                )
+
+        self._run_default_validators(
+            field_name, field_method, field_value, explicit_validators
+        )
+
+    def _run_default_validators(
+        self, field_name, field_method, field_value, explicit_validators
+    ):
+        """Runs default validators that aren't explicitly attached to the field."""
+        for validator_type, validator_config in _validator_registry.items():
+            validator_class = validator_config["validator"]
+            accept_none = validator_config["accept_none"]
+
+            validator_already_used = any(
+                isinstance(v, dict)
+                and v["validator"].validator_type == validator_type
+                or hasattr(v, "validator_type")
+                and v.validator_type == validator_type
+                for v in explicit_validators
+            )
+
+            if validator_already_used:
                 continue
 
-            # Get the current value from stored fields
-            field_value = self._fields.get(field_name)
+            if accept_none and field_value is None and not accept_none:
+                continue
 
-            # Get parameter count to determine how to call the method
-            sig = inspect.signature(field_method)
-            param_count = len(sig.parameters)
+            validator_instance = validator_class()
+            validation_input = ValidationInput(
+                value=field_value,
+                field_name=field_name,
+                definition=field_method,
+                model_instance=self,
+            )
 
-            # Store the validated result for later use
             try:
-                if param_count == 1:  # Just self
-                    result = field_method(self)
-                elif param_count == 2:  # self and input
-                    result = field_method(self, field_value)
-                else:
-                    raise ValueError(
-                        f"Invalid parameter count for {field_name}: expected 0 or 1, got {param_count - 1}"
+                result = validator_instance.default(validation_input)
+                if not result.is_valid:
+                    raise ValidationException(
+                        message=result.message
+                        or f"Default validation failed for {field_name}",
+                        field_name=field_name,
+                        received={"value": field_value},
+                        expected={
+                            "validator": validator_instance.validator_type,
+                            "implicitRule": True,
+                        },
                     )
-
-                # Store the result for later retrieval
-                if result is not None:
-                    self._cached_values[field_name] = result
+                elif result.value is not None:
+                    field_value = result.value
+                    setattr(self, field_name, result.value)
             except Exception as e:
-                # If not a ValidationException, wrap it
                 if not isinstance(e, ValidationException):
-                    expected_type = get_type_hints(field_method).get("return", Any)
                     raise ValidationException(
                         message=str(e),
                         field_name=field_name,
                         received={"value": field_value},
-                        expected={"type": str(expected_type)},
+                        expected={
+                            "validator": validator_instance.validator_type,
+                            "implicitRule": True,
+                        },
                     )
                 raise
-
-            # Run all explicitly attached validators
-            explicit_validators = []
-            if hasattr(field_method, "_validators") and field_method._validators:
-                explicit_validators = field_method._validators
-
-                for validator_config in explicit_validators:
-                    validator_kwargs = validator_config["decorator_kwargs"]
-                    validator_instance = validator_config["validator"]
-                    self._run_validator(
-                        validator_instance,
-                        field_name,
-                        field_method,
-                        field_value,
-                        **validator_kwargs,
-                    )
-
-            # Run default validation from all registered validators that are not explicitly attached
-            for validator_type, validator_class in _validator_registry.items():
-                # Check if this validator type is already used explicitly
-                validator_already_used = any(
-                    isinstance(v, dict)
-                    and v["validator"].validator_type == validator_type
-                    or hasattr(v, "validator_type")
-                    and v.validator_type == validator_type
-                    for v in explicit_validators
-                )
-
-                if validator_already_used:
-                    continue
-
-                # Create an instance if needed
-                validator_instance = validator_class()
-
-                # Create validation input for default validation
-                validation_input = ValidationInput(
-                    value=field_value,
-                    field_name=field_name,
-                    definition=field_method,
-                    model_instance=self,
-                )
-
-                # Run the default validation (special validators like Type or AllowNone may do something here)
-                try:
-                    result = validator_instance.default(validation_input)
-                    if not result.is_valid:
-                        raise ValidationException(
-                            message=result.message
-                            or f"Default validation failed for {field_name}",
-                            field_name=field_name,
-                            received={"value": field_value},
-                            expected={
-                                "validator": validator_instance.validator_type,
-                                "implicitRule": True,
-                            },
-                        )
-                    elif result.value is not None:
-                        # Update with transformed value
-                        field_value = result.value
-                        setattr(self, field_name, result.value)
-                except Exception as e:
-                    if not isinstance(e, ValidationException):
-                        raise ValidationException(
-                            message=str(e),
-                            field_name=field_name,
-                            received={"value": field_value},
-                            expected={
-                                "validator": validator_instance.validator_type,
-                                "implicitRule": True,
-                            },
-                        )
-                    raise
-
-        # Run custom validation logic
-        self._validate_custom()
 
     def _run_validator(
         self,
@@ -380,8 +364,7 @@ class ValidatedModel(ABC):
         field_value,
         **validator_kwargs,
     ):
-        """Helper method to run a validator against a field."""
-        # Prepare validation input
+        """Runs a validator against a field."""
         validation_input = ValidationInput(
             value=field_value,
             field_name=field_name,
@@ -389,13 +372,10 @@ class ValidatedModel(ABC):
             model_instance=self,
         )
 
-        # Run validation
         try:
             result = validator_instance.validate(validation_input, **validator_kwargs)
 
-            # Handle validation result
             if not result.is_valid:
-                # No default, raise exception immediately
                 raise ValidationException(
                     message=result.message or f"Validation failed for {field_name}",
                     field_name=field_name,
@@ -403,12 +383,9 @@ class ValidatedModel(ABC):
                     expected={"validator": validator_instance.validator_type},
                 )
             elif result.value is not None:
-                # Update with transformed value
                 setattr(self, field_name, result.value)
         except Exception as e:
-            # If not a ValidationException, wrap it
             if not isinstance(e, ValidationException):
-                print(e)
                 raise ValidationException(
                     message=str(e),
                     field_name=field_name,
@@ -423,10 +400,7 @@ class ValidatedModel(ABC):
 
 
 class ValidationException(Exception):
-    message: str
-    field_name: str
-    received: dict
-    expected: dict
+    """Exception raised when validation fails."""
 
     def __init__(
         self,
@@ -444,52 +418,27 @@ class ValidationException(Exception):
     def format_error(self) -> str:
         """Formats the validation error in a Rust-style with visual indicators."""
         error_lines = []
-
-        # Header with error type and field
         error_lines.append(
             f"\033[1;31merror[E0001]\033[0m: validation failed for field '{self.field_name}'"
         )
         error_lines.append(f"  --> schema::{self.field_name}")
         error_lines.append(f"   |")
-
-        # Add the error message
         error_lines.append(f"   | {self.message}")
         error_lines.append(f"   |")
 
-        # Format the received value (flattened object)
         received_str = str(self.received)
         error_lines.append(f"   | received: {received_str}")
 
-        # Use field_name directly as the problem key
         problem_key = self.field_name
+        highlight_pos = self._find_highlight_position(received_str, problem_key)
 
-        # Look for the problem key in the received object
-        # Try to find exact match or nested path components
-        highlight_pos = -1
-
-        # First check for exact key match
-        if f"'{problem_key}'" in received_str:
-            highlight_pos = received_str.find(f"'{problem_key}'")
-        # Otherwise check for potential nested fields (using parts of the field name)
-        elif "." in problem_key:
-            # For nested fields like 'user.age', try to find 'age'
-            nested_key = problem_key.split(".")[-1]
-            if f"'{nested_key}'" in received_str:
-                highlight_pos = received_str.find(f"'{nested_key}'")
-
-        # If we found the key in the received string, highlight it
         if highlight_pos >= 0:
-            key_to_highlight = (
-                problem_key
-                if f"'{problem_key}'" in received_str
-                else problem_key.split(".")[-1]
-            )
+            key_to_highlight = self._get_key_to_highlight(received_str, problem_key)
             pad = " " * (len("   | received: ") + highlight_pos)
             error_lines.append(
                 f"   |           {pad}{'^' * (len(str(key_to_highlight)) + 2)}"
             )
 
-        # Show expected schema constraints
         schema_items = []
         for key, value in self.expected.items():
             schema_items.append(f"{key}: {value}")
@@ -498,25 +447,44 @@ class ValidationException(Exception):
         error_lines.append(f"   | expected schema: {schema_str}")
         error_lines.append(f"   |")
 
-        # Add help suggestion if available
-        if "suggestion" in self.expected:
-            error_lines.append(
-                f"   = \033[1;32mhelp\033[0m: {self.expected['suggestion']}"
-            )
-        else:
-            # Generate a suggestion based on the field name
-            error_lines.append(
-                f"   = \033[1;32mhelp\033[0m: Check the '{problem_key}' value against the schema requirements"
-            )
+        help_message = self._generate_help_message(problem_key)
+        error_lines.append(f"   = \033[1;32mhelp\033[0m: {help_message}")
 
         return "\n".join(error_lines)
+
+    def _find_highlight_position(self, received_str, problem_key):
+        """Finds the position to highlight in the received string."""
+        highlight_pos = -1
+
+        if f"'{problem_key}'" in received_str:
+            highlight_pos = received_str.find(f"'{problem_key}'")
+        elif "." in problem_key:
+            nested_key = problem_key.split(".")[-1]
+            if f"'{nested_key}'" in received_str:
+                highlight_pos = received_str.find(f"'{nested_key}'")
+
+        return highlight_pos
+
+    def _get_key_to_highlight(self, received_str, problem_key):
+        """Determines which key to highlight in the error message."""
+        if f"'{problem_key}'" in received_str:
+            return problem_key
+        elif "." in problem_key:
+            return problem_key.split(".")[-1]
+        return problem_key
+
+    def _generate_help_message(self, problem_key):
+        """Generates a helpful message for fixing the validation error."""
+        if "suggestion" in self.expected:
+            return self.expected["suggestion"]
+        return f"Check the '{problem_key}' value against the schema requirements"
 
     def __str__(self) -> str:
         return self.format_error()
 
 
 class CallableValue:
-    """A wrapper for values that makes them callable."""
+    """Value wrapper that enables getter/setter behavior while preserving comparison operations."""
 
     def __init__(self, value, instance, field_name):
         self.value = value
@@ -525,29 +493,44 @@ class CallableValue:
 
     def __call__(self, *args, **kwargs):
         if not args and not kwargs:
-            # Called with no arguments, just return the value
             return self.value
 
-        # Called with arguments, try to update the value
-        # Get the method from the class
         method = getattr(self.instance.__class__, self.field_name)
+
         if hasattr(method, "_is_validation_field") and method._is_validation_field:
-            # Call the method with the new value
             result = method(self.instance, *args, **kwargs)
-            # Update the cached value
             self.instance._cached_values[self.field_name] = result
-            # Also update our value
             self.value = result
             return result
 
-        # If it's not a validation field, just call the method
         return method(self.instance, *args, **kwargs)
 
     def __eq__(self, other):
         return self.value == other
+
+    def __ne__(self, other):
+        return self.value != other
+
+    def __lt__(self, other):
+        return self.value < other
+
+    def __le__(self, other):
+        return self.value <= other
+
+    def __gt__(self, other):
+        return self.value > other
+
+    def __ge__(self, other):
+        return self.value >= other
 
     def __repr__(self):
         return repr(self.value)
 
     def __str__(self):
         return str(self.value)
+
+    def __bool__(self):
+        return bool(self.value)
+
+    def __hash__(self):
+        return hash(self.value)
