@@ -1,6 +1,10 @@
 import pytest
 import sys
 import os
+from pathlib import Path
 
-# Add the project root to the Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# Add parent directory to path to make imports work when running tests directly
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+# This allows running tests with 'pytest uhmactually/tests'
+# No fixtures needed for now, but we can add them here as needed
